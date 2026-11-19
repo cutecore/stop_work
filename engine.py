@@ -24,6 +24,16 @@ def format_duration(seconds: float) -> str:
     return _format_total(total)
 
 
+def format_countdown(seconds: float) -> str:
+    """分:秒:百分秒。末两位连续跳动，倒计时更紧。"""
+    if not math.isfinite(seconds) or seconds <= 0:
+        return "00:00:00"
+    total = int(math.ceil(seconds * 100 - 1e-6))
+    minutes, rem = divmod(total, 6000)
+    secs, centi = divmod(rem, 100)
+    return f"{minutes:02d}:{secs:02d}:{centi:02d}"
+
+
 def format_elapsed(seconds: float) -> str:
     if not math.isfinite(seconds) or seconds <= 0:
         return "00:00"

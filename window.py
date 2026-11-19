@@ -1,101 +1,168 @@
-"""始终浮在桌面上的休息卡片。EVA 风：工作放电，休息充电。"""
+"""始终浮在桌面上的休息面板。只留装甲中间的黑板和倒计时。"""
 
 from __future__ import annotations
 
 import math
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QCursor,
     QFont,
+    QFontDatabase,
     QFontMetrics,
     QGuiApplication,
     QIcon,
     QLinearGradient,
     QPainter,
     QPen,
-    QPolygonF,
     QPixmap,
+    QPolygonF,
 )
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
-from engine import REST_MINUTES, WORK_MINUTES, View, format_duration
+from engine import View, format_countdown
 from store import log, save_state
 
 if TYPE_CHECKING:
     from engine import Engine
     from monitor import ActivityMonitor
 
-PAD = 16
-CARD_W = 176
-CARD_H = 86
-WIN_W = CARD_W + PAD * 2
-WIN_H = CARD_H + PAD * 2
-CORNER = 10
-SEGMENTS = 10
+# 参考画布 1500×600。留下中间黑板、右侧电源框和底部档位，不含左边斜腿和四周底纹。
+CROP_X = 500.0
+CROP_Y = 104.0
+CROP_W = 924.0
+CROP_H = 392.0
+SCALE = 0.40
+WIN_W = round(CROP_W * SCALE)
+WIN_H = round(CROP_H * SCALE)
 LOW_BATTERY = 0.22
 
-THEMES = {
-    "work": {
-        "top": "#14120F",
-        "bottom": "#0A0908",
-        "text": "#F4EDE3",
-        "muted": "#B89A78",
-        "accent": "#FF6A00",
-        "track": "#2A1E14",
-        "dot": "#FF6A00",
-        "line": "#FF6A00",
-    },
-    "paused": {
-        "top": "#121110",
-        "bottom": "#080807",
-        "text": "#D8CFC3",
-        "muted": "#7E7366",
-        "accent": "#9A6B3A",
-        "track": "#241C16",
-        "dot": "#8A7A68",
-        "line": "#6E5A44",
-    },
-    "rest": {
-        "top": "#0C1410",
-        "bottom": "#070B09",
-        "text": "#E8FFE8",
-        "muted": "#7CB88A",
-        "accent": "#7CFF4A",
-        "track": "#15241A",
-        "dot": "#7CFF4A",
-        "line": "#7CFF4A",
-    },
-    "empty": {
-        "top": "#1C0C0C",
-        "bottom": "#100606",
-        "text": "#FFE4DE",
-        "muted": "#D07870",
-        "accent": "#FF2A2A",
-        "track": "#2E1010",
-        "dot": "#FF2A2A",
-        "line": "#FF2A2A",
-    },
+AMBER = QColor("#ffac1e")
+RED = QColor("#ff2415")
+CYAN = QColor("#3fd8ff")
+BLACK = QColor("#000000")
+
+MINCHO_FILE = Path(r"C:\Users\cutec\Documents\方正字库\Font\FZFWZhuZiAOldMinchoR.TTF")
+_MINCHO_FAMILY: str | None = None
+
+PLATE = [
+    (515, 118),
+    (742, 118),
+    (759.4, 146.7),
+    (1410, 146.7),
+    (1410, 484),
+    (583, 484),
+    (583, 222),
+    (515, 222),
+]
+LEG = [
+    (515, 222),
+    (583, 222),
+    (583, 420),
+    (515, 420),
+    (437, 530.5),
+    (352, 502.5),
+]
+NOTCH = [
+    (492, 118),
+    (514, 118),
+    (514, 170),
+    (491, 164),
+    (488, 160),
+    (488, 126),
+]
+SLOT = [
+    (348, 509.5),
+    (433, 537.5),
+    (388.9, 600),
+    (295.4, 600),
+]
+FLOOR = [
+    (440, 600),
+    (560, 488),
+    (1500, 488),
+    (1500, 600),
+]
+
+SEG_MASK = {
+    "0": "abcdef",
+    "1": "bc",
+    "2": "abdeg",
+    "3": "abcdg",
+    "4": "bcfg",
+    "5": "acdfg",
+    "6": "acdefg",
+    "7": "abc",
+    "8": "abcdefg",
+    "9": "abcdfg",
+    "-": "g",
 }
 
 
-def make_font(
-    size: int,
-    weight: QFont.Weight = QFont.Weight.Normal,
-    *,
-    digits: bool = False,
-) -> QFont:
-    font = QFont()
-    if digits:
-        font.setFamilies(["Cascadia Mono", "Consolas", "Segoe UI"])
+def _poly(points: list[tuple[float, float]]) -> QPolygonF:
+    return QPolygonF([QPointF(x, y) for x, y in points])
+
+
+def _load_family(path: Path, cache: list[str | None]) -> str | None:
+    if cache[0] is not None:
+        return cache[0] or None
+    if path.is_file():
+        font_id = QFontDatabase.addApplicationFont(str(path))
+        families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+        cache[0] = families[0] if families else ""
     else:
-        font.setFamilies(["Cascadia Mono", "Consolas", "Microsoft YaHei UI", "Segoe UI"])
+        cache[0] = ""
+    return cache[0] or None
+
+
+def mincho_family() -> str | None:
+    global _MINCHO_FAMILY
+    family = _load_family(MINCHO_FILE, [_MINCHO_FAMILY])
+    _MINCHO_FAMILY = family or ""
+    return family
+
+
+def make_font(size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
+    font = QFont()
+    font.setFamilies(["Bahnschrift", "Segoe UI", "Microsoft YaHei UI"])
     font.setPixelSize(size)
     font.setWeight(weight)
-    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6 if not digits else 0.0)
+    font.setKerning(False)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    return font
+
+
+def make_en_font(size: float, weight: QFont.Weight = QFont.Weight.Bold) -> QFont:
+    font = QFont("Arial")
+    font.setPixelSize(max(1, int(round(size))))
+    font.setWeight(weight)
+    font.setKerning(False)
+    font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    return font
+
+
+def make_mincho(size: float) -> QFont:
+    family = mincho_family()
+    font = QFont(family) if family else make_jp_font(int(size))
+    font.setPixelSize(max(1, int(round(size))))
+    font.setWeight(QFont.Weight.Bold)
+    font.setKerning(False)
+    font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    return font
+
+
+def make_jp_font(size: int, weight: QFont.Weight = QFont.Weight.Black) -> QFont:
+    font = QFont()
+    font.setFamilies(["Yu Gothic UI", "Yu Gothic", "Meiryo UI", "Microsoft YaHei UI"])
+    font.setPixelSize(size)
+    font.setWeight(weight)
     font.setKerning(False)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     return font
@@ -107,25 +174,16 @@ def make_icon() -> QIcon:
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(AMBER, 3))
+    painter.setBrush(BLACK)
+    painter.drawPolygon(
+        _poly([(8, 14), (28, 14), (34, 22), (56, 22), (56, 50), (8, 50)])
+    )
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor("#0A0908"))
-    painter.drawRoundedRect(4, 4, 56, 56, 4, 4)
-    painter.setBrush(QColor("#FF6A00"))
-    for index in range(6):
-        y = 14 + index * 7
-        painter.drawRect(22, y, 20, 5)
+    painter.setBrush(AMBER)
+    _paint_digit(painter, QRectF(22, 26, 20, 20), 4, "8", AMBER, ghost=False)
     painter.end()
     return QIcon(pixmap)
-
-
-def copy_for(view: View) -> tuple[str, str]:
-    if view.kind == "work":
-        return "DRAIN", f"INTERNAL · {WORK_MINUTES}m"
-    if view.kind == "paused":
-        return "STANDBY", "Battery full"
-    if view.kind == "rest":
-        return "CHARGE", f"EXT POWER · {REST_MINUTES}m"
-    return "EMPTY", "Charge required"
 
 
 def clamp_position(x: int, y: int, width: int, height: int) -> tuple[int, int]:
@@ -157,8 +215,8 @@ def clamp_position(x: int, y: int, width: int, height: int) -> tuple[int, int]:
 def default_position(width: int, height: int) -> tuple[int, int]:
     screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
     geo = screen.availableGeometry() if screen is not None else QRectF(0, 0, 1280, 720)
-    x = int(geo.right() - PAD - CARD_W - 12)
-    y = int(geo.top() + 12 - PAD)
+    x = int(geo.right() - width - 16)
+    y = int(geo.top() + 16)
     return clamp_position(x, y, width, height)
 
 
@@ -180,22 +238,166 @@ def pin_topmost(hwnd: int) -> None:
     )
 
 
-def draw_time(painter: QPainter, x: float, baseline: float, text: str, color: QColor) -> float:
-    metrics = painter.fontMetrics()
-    digit = metrics.horizontalAdvance("0")
-    cursor = x
+def _digit_parts(x: float, y: float, w: float, h: float, thickness: float) -> dict[str, QPolygonF]:
+    gap = thickness * 0.28
+    inset = thickness * 0.08
+
+    def horizontal(top: float) -> QPolygonF:
+        left = x + inset
+        right = x + w - inset
+        point = thickness * 0.48
+        return _poly(
+            [
+                (left + point, top),
+                (right - point, top),
+                (right, top + thickness / 2),
+                (right - point, top + thickness),
+                (left + point, top + thickness),
+                (left, top + thickness / 2),
+            ]
+        )
+
+    def vertical(left: float, top: float, height: float) -> QPolygonF:
+        point = thickness * 0.46
+        return _poly(
+            [
+                (left + thickness / 2, top),
+                (left + thickness, top + point),
+                (left + thickness, top + height - point),
+                (left + thickness / 2, top + height),
+                (left, top + height - point),
+                (left, top + point),
+            ]
+        )
+
+    mid = y + (h - thickness) / 2
+    upper_top = y + thickness + gap * 0.35
+    upper_h = mid - upper_top
+    lower_top = mid + thickness + gap * 0.35
+    lower_h = (y + h - thickness) - lower_top
+    return {
+        "a": horizontal(y),
+        "g": horizontal(mid),
+        "d": horizontal(y + h - thickness),
+        "f": vertical(x, upper_top, upper_h),
+        "b": vertical(x + w - thickness, upper_top, upper_h),
+        "e": vertical(x, lower_top, lower_h),
+        "c": vertical(x + w - thickness, lower_top, lower_h),
+    }
+
+
+def _paint_digit(
+    painter: QPainter,
+    box: QRectF,
+    thickness: float,
+    char: str,
+    color: QColor,
+    *,
+    ghost: bool,
+) -> None:
+    parts = _digit_parts(box.x(), box.y(), box.width(), box.height(), thickness)
+    lit = SEG_MASK.get(char, "")
+    ghost_color = QColor(color)
+    ghost_color.setAlpha(28 if ghost else 18)
+    painter.setPen(Qt.PenStyle.NoPen)
+    for name, polygon in parts.items():
+        on = name in lit
+        if not on:
+            painter.setBrush(ghost_color)
+            painter.drawPolygon(polygon)
+            continue
+        glow = QColor(color)
+        glow.setAlpha(110)
+        painter.setBrush(glow)
+        painter.drawPolygon(polygon)
+        painter.setBrush(color)
+        painter.drawPolygon(polygon)
+
+
+def _paint_colon(painter: QPainter, x: float, y: float, height: float, size: float, color: QColor) -> None:
+    center = y + height / 2
+    gap = max(size * 1.15, height * 0.16)
+    painter.setPen(Qt.PenStyle.NoPen)
+    glow = QColor(color)
+    glow.setAlpha(90)
+    for top in (center - gap - size, center + gap):
+        painter.setBrush(glow)
+        painter.drawRect(QRectF(x - 1.5, top - 1.5, size + 3, size + 3))
+        painter.setBrush(color)
+        painter.drawRect(QRectF(x, top, size, size))
+
+
+def _glow_text(
+    painter: QPainter,
+    rect: QRectF,
+    text: str,
+    font: QFont,
+    color: QColor,
+    flags: int,
+) -> None:
+    painter.setFont(font)
+    glow = QColor(color)
+    glow.setAlpha(80)
+    painter.setPen(glow)
+    for dx, dy in ((-1.4, 0), (1.4, 0), (0, -1.4), (0, 1.4)):
+        painter.drawText(rect.translated(dx, dy), flags, text)
     painter.setPen(color)
-    for char in text:
-        if char.isdigit():
-            cell = digit
-            char_width = metrics.horizontalAdvance(char)
-            painter.drawText(int(cursor + (cell - char_width) / 2), int(baseline), char)
-            cursor += cell
-        else:
-            char_width = metrics.horizontalAdvance(char)
-            painter.drawText(int(cursor), int(baseline), char)
-            cursor += char_width + 1
-    return cursor - x
+    painter.drawText(rect, flags, text)
+
+
+def _fitted_en(text: str, max_width: float, size: float, floor: float = 8) -> QFont:
+    px = size
+    while px >= floor:
+        font = make_en_font(px)
+        if QFontMetrics(font).horizontalAdvance(text) <= max_width:
+            return font
+        px -= 0.5
+    return make_en_font(floor)
+
+
+def _spread_line(
+    painter: QPainter,
+    rect: QRectF,
+    text: str,
+    font: QFont,
+    color: QColor,
+) -> None:
+    """字距只拉开能放下的字，避免小框里叠成一团。"""
+    size = font.pixelSize()
+    chosen = QFont(font)
+    widths = [rect.width()]
+    while size >= 6:
+        trial = QFont(font)
+        trial.setPixelSize(size)
+        metrics = QFontMetrics(trial)
+        widths = [metrics.horizontalAdvance(char) for char in text]
+        if sum(widths) <= rect.width():
+            chosen = trial
+            break
+        size -= 1
+    else:
+        _glow_text(
+            painter,
+            rect,
+            text,
+            chosen,
+            color,
+            int(Qt.AlignmentFlag.AlignCenter),
+        )
+        return
+    metrics = QFontMetrics(chosen)
+    extra = rect.width() - sum(widths)
+    gap = extra / (len(text) - 1) if len(text) > 1 else 0
+    baseline = rect.bottom() - metrics.descent()
+    x = rect.x()
+    painter.save()
+    painter.setClipRect(rect.adjusted(-1, -3, 1, 2))
+    painter.setFont(chosen)
+    for char, width in zip(text, widths):
+        painter.setPen(color)
+        painter.drawText(QPointF(x, baseline), char)
+        x += width + gap
+    painter.restore()
 
 
 class FloatWindow(QWidget):
@@ -240,19 +442,18 @@ class FloatWindow(QWidget):
         self._menu.setStyleSheet(
             """
             QMenu {
-                background-color: #0A0908;
-                color: #F4EDE3;
-                border: 1px solid #FF6A00;
-                border-radius: 2px;
+                background-color: #000000;
+                color: #ffac1e;
+                border: 1px solid #ffac1e;
+                border-radius: 0px;
                 padding: 4px;
             }
             QMenu::item {
                 padding: 8px 18px;
-                border-radius: 0px;
             }
             QMenu::item:selected {
-                background-color: #2A1A0E;
-                color: #FF6A00;
+                background-color: #2a1a08;
+                color: #ffac1e;
             }
             """
         )
@@ -344,279 +545,405 @@ class FloatWindow(QWidget):
         now = time.monotonic()
         view = self._forced_view if self._forced_view is not None else self.engine.view(now)
         healthy = True if self._forced_view is not None else self.monitor.healthy()
-        theme = dict(THEMES[view.kind])
-        level = view.battery
-        low = healthy and (
-            view.kind == "empty" or (view.kind == "work" and level <= LOW_BATTERY)
+        alert = healthy and (
+            view.kind == "empty" or (view.kind == "work" and view.level <= LOW_BATTERY)
         )
-        blink = 1.0
-        if low:
-            blink = 0.28 + 0.72 * (0.5 + 0.5 * math.sin(now * 9.5))
-        elif view.kind == "rest" and healthy:
-            blink = 0.82 + 0.18 * (0.5 + 0.5 * math.sin(now * 2.6))
+        ink = QColor(RED if alert else AMBER)
+        if alert and view.kind == "empty":
+            ink.setAlpha(255 if (now * 2.5) % 1.0 < 0.62 else 70)
+        elif alert:
+            ink.setAlpha(int(180 + 75 * (0.5 + 0.5 * math.sin(now * 9.0))))
 
-        card = QRectF(PAD, PAD, CARD_W, CARD_H)
-        self._paint_shadow(painter, card)
-        self._paint_panel(painter, card, theme, blink if low else 1.0)
-        self._paint_hud(painter, card, theme, view, blink if low else 1.0)
+        sx = self.width() / CROP_W
+        sy = self.height() / CROP_H
+        painter.scale(sx, sy)
+        painter.translate(-CROP_X, -CROP_Y)
+        self._paint_armor(painter, ink)
+        self._paint_title(painter, ink)
+        readout = format_countdown(view.hero_seconds) if healthy else "--:--:--"
+        self._paint_readout(painter, readout, ink)
+        self._paint_supply(painter, view, healthy, ink, now)
+        self._paint_modes(painter, view, healthy, ink, alert, now)
+        self._paint_danger(painter, alert, now)
+        self._paint_subscribe(painter)
 
-        cell = QRectF(card.x() + 12, card.y() + 16, 20, card.height() - 28)
-        self._paint_cells(painter, cell, view, theme, level, blink, now)
-        self._paint_copy(painter, card, cell, view, theme, healthy, blink if low else 1.0)
-
-    def _panel_path(self, card: QRectF) -> QPolygonF:
-        x, y, w, h = card.x(), card.y(), card.width(), card.height()
-        c = CORNER
-        return QPolygonF(
-            [
-                QPointF(x + c, y),
-                QPointF(x + w, y),
-                QPointF(x + w, y + h - c),
-                QPointF(x + w - c, y + h),
-                QPointF(x, y + h),
-                QPointF(x, y + c),
-            ]
+    def _paint_ground(self, painter: QPainter) -> None:
+        gradient = QLinearGradient(QPointF(200, 600), QPointF(1500, 0))
+        stops = (
+            (0.00, "#b2403c"),
+            (0.20, "#b58a3a"),
+            (0.30, "#a9be4a"),
+            (0.38, "#81ba5d"),
+            (0.64, "#55995a"),
+            (0.80, "#3f8aa0"),
+            (0.92, "#3f68ae"),
+            (1.00, "#4b4fb0"),
         )
-
-    def _paint_shadow(self, painter: QPainter, card: QRectF) -> None:
+        for offset, color in stops:
+            gradient.setColorAt(offset, QColor(color))
         painter.setPen(Qt.PenStyle.NoPen)
-        layers = 7
-        for index in range(layers, 0, -1):
-            t = index / layers
-            alpha = int(22 * (1 - t) ** 2)
-            if alpha <= 0:
-                continue
-            painter.setBrush(QColor(0, 0, 0, alpha))
-            drop = 4 * t
-            spread = 3 * t
-            rect = card.adjusted(-spread, -spread * 0.2 + drop, spread, spread + drop)
-            painter.drawPolygon(self._panel_path(rect))
+        painter.setBrush(QBrush(gradient))
+        painter.drawRect(QRectF(CROP_X - 4, CROP_Y - 4, CROP_W + 8, CROP_H + 8))
+        painter.setBrush(BLACK)
+        painter.drawRect(QRectF(CROP_X - 4, 0, CROP_W + 8, 48))
+        painter.drawPolygon(_poly(FLOOR))
+        painter.drawRect(QRectF(200, 0, 10, 600))
+        painter.drawRect(QRectF(220, 0, 5, 600))
 
-    def _paint_panel(
-        self,
-        painter: QPainter,
-        card: QRectF,
-        theme: dict[str, str],
-        blink: float,
-    ) -> None:
-        gradient = QLinearGradient(card.topLeft(), card.bottomLeft())
-        gradient.setColorAt(0, QColor(theme["top"]))
-        gradient.setColorAt(1, QColor(theme["bottom"]))
-        border = QColor(theme["accent"] if self._bonus > 0 else theme["line"])
-        base_alpha = 120 + 135 * self._bonus if self._bonus > 0 else 210
-        border.setAlpha(int(base_alpha * blink))
-        pen = QPen(border, 1.5 + 1.5 * self._bonus)
+    def _paint_armor(self, painter: QPainter, ink: QColor) -> None:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(BLACK)
+        painter.drawPolygon(_poly(PLATE))
+        pen = QPen(ink, 2.4)
+        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        pen.setMiterLimit(2.4)
+        glow = QColor(ink)
+        glow.setAlpha(120)
+        glow_pen = QPen(glow, 7.0)
+        glow_pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        glow_pen.setMiterLimit(2.0)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        polygon = _poly(PLATE)
+        painter.setPen(glow_pen)
+        painter.drawPolygon(polygon)
         painter.setPen(pen)
-        painter.setBrush(gradient)
-        painter.drawPolygon(self._panel_path(card))
+        painter.drawPolygon(polygon)
 
-    def _paint_hud(
+    def _paint_ticks(self, painter: QPainter, ink: QColor) -> None:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(CYAN)
+        x = 200.0
+        while x < CROP_X + CROP_W:
+            painter.drawRect(QRectF(x, 34, 3, 9))
+            painter.drawRect(QRectF(x + 12, 34, 3, 9))
+            x += 100
+        painter.setBrush(BLACK)
+        x = 248.0
+        while x < 1400:
+            painter.drawRect(QRectF(x, 50, 3, 11))
+            x += 100
+        painter.setBrush(CYAN)
+        for mark in (568, 629, 724, 769, 864, 909, 1004, 1049, 1144, 1199, 1303, 1398):
+            painter.drawRect(QRectF(mark, 490, 3, 8))
+        for mark in (568, 629, 746.5, 886.5, 1026.5, 1171.5, 1303, 1398):
+            painter.drawRect(QRectF(mark, 506, 3, 8))
+        y = 72.0
+        while y < 590:
+            painter.drawRect(QRectF(201.5, y, 7, 2))
+            y += 40
+        painter.setBrush(ink)
+        for mark in (603, 608, 745, 749, 885, 889, 1025, 1029, 1173, 1178, 1303, 1307, 1398, 1402):
+            painter.drawRect(QRectF(mark, 424, 2, 10))
+
+    def _paint_title(self, painter: QPainter, ink: QColor) -> None:
+        title_font = make_mincho(40)
+        title_font.setStretch(92)
+        _glow_text(
+            painter,
+            QRectF(518, 108, 250, 62),
+            "活動限界まで",
+            title_font,
+            ink,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+        )
+        en_font = _fitted_en("ACTIVE TIME REMAINING:", 430, 23, 14)
+        _glow_text(
+            painter,
+            QRectF(752, 146, 450, 30),
+            "ACTIVE TIME REMAINING:",
+            en_font,
+            ink,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+        )
+        ato = make_mincho(28)
+        _glow_text(
+            painter,
+            QRectF(526, 176, 80, 36),
+            "あと",
+            ato,
+            ink,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+        )
+
+    def _paint_readout(self, painter: QPainter, text: str, ink: QColor) -> None:
+        digits = "".join(char for char in text if char.isdigit() or char == "-")
+        if len(digits) < 6:
+            digits = digits.rjust(6, "0" if digits.isdigit() else "-")
+        digits = digits[-6:]
+        big = (92.0, 196.0, 20.0)
+        small = (60.0, 132.0, 14.0)
+        y = 196.0
+        places = (
+            (598.0, y, *big),
+            (700.0, y, *big),
+            (828.0, y, *big),
+            (930.0, y, *big),
+            (1052.0, y + big[1] - small[1], *small),
+            (1122.0, y + big[1] - small[1], *small),
+        )
+        for char, (x, top, width, height, thickness) in zip(digits, places):
+            _paint_digit(painter, QRectF(x, top, width, height), thickness, char, ink, ghost=True)
+        _paint_colon(painter, 806, y, big[1], 13, ink)
+        _paint_colon(painter, 1034, y + big[1] - small[1], small[1], 9, ink)
+
+    def _supply_name(self, view: View, healthy: bool) -> str:
+        if not healthy:
+            return ""
+        if view.kind in ("rest", "paused"):
+            return "external"
+        return "internal"
+
+    def _paint_supply(
         self,
         painter: QPainter,
-        card: QRectF,
-        theme: dict[str, str],
         view: View,
-        blink: float,
+        healthy: bool,
+        ink: QColor,
+        now: float,
     ) -> None:
-        line = QColor(theme["line"])
-        line.setAlpha(int(150 * blink))
-        painter.setPen(QPen(line, 1.0))
-        top_y = card.y() + 8
-        bot_y = card.bottom() - 8
-        painter.drawLine(QPointF(card.x() + CORNER + 2, top_y), QPointF(card.right() - 10, top_y))
-        painter.drawLine(QPointF(card.x() + 10, bot_y), QPointF(card.right() - CORNER - 2, bot_y))
+        active = self._supply_name(view, healthy)
+        pulse = 0.9 + 0.1 * math.sin(now * 3.4)
+        self._paint_mode_box(
+            painter,
+            QRectF(1216, 182, 182, 84),
+            "内部",
+            "INTERNAL",
+            ink,
+            active=active == "internal",
+            zebra=active == "internal",
+            pulse=pulse,
+        )
+        self._paint_power(painter, ink, pulse if healthy else 0.45)
+        self._paint_mode_box(
+            painter,
+            QRectF(1216, 328, 182, 84),
+            "外部",
+            "EXTERNAL",
+            ink,
+            active=active == "external",
+            zebra=active == "external",
+            pulse=pulse,
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(CYAN)
+        for top, height in ((173, 8), (267, 8), (319, 8), (414, 5)):
+            painter.drawRect(QRectF(1216, top, 3, height))
+            painter.drawRect(QRectF(1395, top, 3, height))
 
-        mark = QColor(theme["accent"])
-        mark.setAlpha(int(220 * blink))
-        painter.setPen(QPen(mark, 1.4))
-        painter.drawLine(
-            QPointF(card.right() - 18, card.y() + 3),
-            QPointF(card.right() - 3, card.y() + 3),
-        )
-        painter.drawLine(
-            QPointF(card.right() - 3, card.y() + 3),
-            QPointF(card.right() - 3, card.y() + 14),
-        )
-        painter.drawLine(
-            QPointF(card.x() + 3, card.bottom() - 14),
-            QPointF(card.x() + 3, card.bottom() - 3),
-        )
-        painter.drawLine(
-            QPointF(card.x() + 3, card.bottom() - 3),
-            QPointF(card.x() + 18, card.bottom() - 3),
-        )
-
-        tag = "PWR" if view.kind in {"work", "paused"} else "CHG"
-        tag_font = make_font(8, QFont.Weight.Bold)
-        painter.setFont(tag_font)
-        color = QColor(theme["accent"] if view.kind == "rest" else theme["muted"])
-        color.setAlpha(int(255 * blink))
-        painter.setPen(color)
-        painter.drawText(
-            QRectF(card.x() + 10, card.y() + 1, 40, 10),
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            tag,
-        )
-
-    def _paint_cells(
+    def _paint_mode_box(
         self,
         painter: QPainter,
         box: QRectF,
-        view: View,
-        theme: dict[str, str],
-        level: float,
-        blink: float,
-        now: float,
+        jp: str,
+        en: str,
+        ink: QColor,
+        *,
+        active: bool,
+        zebra: bool,
+        pulse: float,
     ) -> None:
-        gap = 2.0
-        seg_h = (box.height() - gap * (SEGMENTS - 1)) / SEGMENTS
-        lit = level * SEGMENTS
-        accent = QColor(theme["accent"])
-        track = QColor(theme["track"])
-
-        # 放电：亮段从上往下灭；充电：从下往上点亮。扫描波沿对应方向跑。
-        if view.kind == "rest":
-            sweep = (now * 0.85) % (SEGMENTS + 2)
-        elif view.kind == "work":
-            sweep = (SEGMENTS + 2) - ((now * 3.2) % (SEGMENTS + 2))
-        else:
-            sweep = -1.0
-
+        painter.save()
+        painter.setOpacity(1.0 if active else 0.36)
         painter.setPen(Qt.PenStyle.NoPen)
-        for index in range(SEGMENTS):
-            # index 0 = 底部。
-            y = box.bottom() - (index + 1) * seg_h - index * gap
-            rect = QRectF(box.x(), y, box.width(), seg_h)
-            painter.setBrush(track)
-            painter.drawRect(rect)
-
-            fill = max(0.0, min(1.0, lit - index))
-            if fill <= 0.001:
-                # 充电时空段也有追逐光点。
-                if view.kind == "rest" and abs(index + 0.5 - sweep) < 0.85:
-                    ghost = QColor(accent)
-                    ghost.setAlpha(int(70 * blink))
-                    painter.setBrush(ghost)
-                    painter.drawRect(rect)
-                continue
-
-            color = QColor(accent)
-            if view.kind == "paused":
-                color.setAlpha(130)
-            else:
-                boost = 1.0
-                if sweep >= 0:
-                    dist = abs(index + 0.5 - sweep)
-                    if dist < 1.2:
-                        boost = 1.0 + 0.55 * (1.0 - dist / 1.2)
-                if view.kind == "work":
-                    # 放电：顶端交界段额外闪。
-                    edge = lit
-                    if abs(index + 0.5 - edge) < 0.9:
-                        boost *= 0.55 + 0.45 * (0.5 + 0.5 * math.sin(now * 12))
-                alpha = int(255 * blink * min(1.35, boost) * (0.35 + 0.65 * fill))
-                color.setAlpha(max(40, min(255, alpha)))
-            painter.setBrush(color)
-            if fill >= 0.999:
-                painter.drawRect(rect)
-            else:
-                painter.drawRect(QRectF(rect.x(), rect.bottom() - rect.height() * fill, rect.width(), rect.height() * fill))
-
-        # 外壳与正极头。
-        shell = QColor(theme["line"])
-        shell.setAlpha(int(200 * blink))
-        painter.setPen(QPen(shell, 1.2))
+        painter.setBrush(BLACK)
+        painter.drawRoundedRect(box, 3, 3)
+        if zebra:
+            self._paint_zebra(painter, QRectF(box.right() - 40, box.top(), 40, box.height()))
+        pen = QPen(ink, 2.2)
+        painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(box.adjusted(-2, -2, 2, 2))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(shell)
-        painter.drawRect(QRectF(box.center().x() - 4, box.y() - 5, 8, 3))
+        painter.drawRoundedRect(box, 3, 3)
+        if active:
+            glow = QColor(ink)
+            glow.setAlpha(int(70 * pulse))
+            painter.setPen(QPen(glow, 6))
+            painter.drawRoundedRect(box, 3, 3)
+        jp_font = make_jp_font(52, QFont.Weight.Black)
+        en_font = _fitted_en(en, box.width() - 56, 22, 12)
+        color = QColor(ink)
+        if active:
+            color.setAlpha(int(255 * min(1.0, pulse + 0.05)))
+        _glow_text(
+            painter,
+            QRectF(box.x() + 8, box.y() - 2, box.width() - 50, 58),
+            jp,
+            jp_font,
+            color,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+        )
+        _glow_text(
+            painter,
+            QRectF(box.x() + 8, box.bottom() - 30, box.width() - 52, 26),
+            en,
+            en_font,
+            color,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+        )
+        painter.restore()
 
-    def _paint_copy(
+    def _paint_power(self, painter: QPainter, ink: QColor, pulse: float) -> None:
+        box = QRectF(1216, 276, 182, 42)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(BLACK)
+        painter.drawRoundedRect(box, 3, 3)
+        painter.setPen(QPen(ink, 2.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(box, 3, 3)
+        glow = QColor(ink)
+        glow.setAlpha(int(80 * pulse))
+        painter.setPen(QPen(glow, 5))
+        painter.drawRoundedRect(box, 3, 3)
+        jp_font = make_jp_font(15, QFont.Weight.Bold)
+        en = "MAIN ENERGY SUPPLY SYSTEM"
+        en_font = _fitted_en(en, box.width() - 12, 10.5, 8)
+        color = QColor(ink)
+        color.setAlpha(int(210 + 45 * pulse))
+        _glow_text(
+            painter,
+            QRectF(box.x() + 6, box.y() + 1, box.width() - 10, 22),
+            "主電源供給システム",
+            jp_font,
+            color,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+        )
+        _glow_text(
+            painter,
+            QRectF(box.x() + 6, box.bottom() - 16, box.width() - 10, 14),
+            en,
+            en_font,
+            color,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+        )
+
+    def _paint_zebra(self, painter: QPainter, rect: QRectF) -> None:
+        painter.save()
+        painter.setClipRect(rect)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#150202"))
+        painter.drawRect(rect)
+        painter.setBrush(QColor("#e8000e"))
+        band = 10.0
+        x = rect.left() - rect.height()
+        while x < rect.right() + band:
+            painter.drawPolygon(
+                _poly(
+                    [
+                        (x, rect.bottom()),
+                        (x + band, rect.bottom()),
+                        (x + band + rect.height(), rect.top()),
+                        (x + rect.height(), rect.top()),
+                    ]
+                )
+            )
+            x += band * 2
+        painter.restore()
+
+    def _mode_index(self, view: View, healthy: bool) -> int:
+        if not healthy or view.kind == "empty" or view.level <= 0.002:
+            return 0
+        if view.level <= LOW_BATTERY:
+            return 1
+        if view.level >= 0.9:
+            return 3
+        return 2
+
+    def _paint_modes(
         self,
         painter: QPainter,
-        card: QRectF,
-        cell: QRectF,
         view: View,
-        theme: dict[str, str],
         healthy: bool,
-        blink: float,
+        ink: QColor,
+        alert: bool,
+        now: float,
     ) -> None:
-        label, subtitle = copy_for(view)
-        if not healthy:
-            label, subtitle = "NO SIGNAL", "Restart unit"
+        labels = ("STOP", "SLOW", "NORMAL", "RACING")
+        selected = self._mode_index(view, healthy) if healthy else -1
+        lefts = (628.0, 768.0, 908.0, 1048.0)
+        blink = 1.0 if not alert else (1.0 if math.sin(now * 10) > 0 else 0.35)
+        for index, (label, left) in enumerate(zip(labels, lefts)):
+            cell = QRectF(left, 428, 100, 48)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#030100"))
+            painter.drawRoundedRect(cell, 3, 3)
+            if index == selected:
+                red = QColor("#fff4f1" if alert else "#ff2a18")
+                red.setAlpha(int(255 * blink))
+                painter.setBrush(red)
+                painter.drawRect(
+                    QRectF(cell.x() + 3, cell.center().y() + 2, cell.width() - 6, cell.height() / 2 - 5)
+                )
+            painter.setPen(QPen(ink, 2.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(cell, 3, 3)
+            font = _fitted_en(label, cell.width() - 8, 21, 12)
+            _glow_text(
+                painter,
+                cell.adjusted(2, 0, -2, 0),
+                label,
+                font,
+                ink,
+                int(Qt.AlignmentFlag.AlignCenter),
+            )
 
-        hero_text = format_duration(view.hero_seconds)
-
-        label_font = make_font(10, QFont.Weight.Bold)
-        hero_size = 15 if hero_text.count(":") >= 2 else 20
-        hero_font = make_font(hero_size, QFont.Weight.DemiBold, digits=True)
-        sub_font = make_font(9)
-
-        label_metrics = QFontMetrics(label_font)
-        hero_metrics = QFontMetrics(hero_font)
-        sub_metrics = QFontMetrics(sub_font)
-
-        text_x = cell.right() + 12
-        right = card.right() - 12
-        label_x = text_x + 11
-        text_w = max(40.0, right - label_x)
-        gap_after_label = 1
-        gap_after_hero = 2
-        block_h = (
-            label_metrics.height()
-            + gap_after_label
-            + hero_metrics.height()
-            + gap_after_hero
-            + sub_metrics.height()
-        )
-        y = card.y() + (card.height() - block_h) / 2
-
-        label_w = text_w
-
-        dot_cy = y + label_metrics.height() / 2
-        dot_color = QColor("#FF2A2A" if not healthy else theme["dot"])
+    def _paint_danger(self, painter: QPainter, alert: bool, now: float) -> None:
+        cell = QRectF(1200, 428, 100, 48)
+        painter.save()
+        if alert:
+            painter.setOpacity(1.0 if math.sin(now * 12) > 0 else 0.28)
+        else:
+            painter.setOpacity(0.24)
         painter.setPen(Qt.PenStyle.NoPen)
-        outer = QColor(dot_color)
-        breath = blink
-        if view.kind == "rest" and healthy:
-            breath = 0.7 + 0.3 * (0.5 + 0.5 * math.sin(time.monotonic() * 2.4))
-        outer.setAlpha(int(90 * breath))
-        side = 5.0 * breath
-        painter.setBrush(outer)
-        painter.drawRect(QRectF(text_x + 3 - side / 2, dot_cy - side / 2, side, side))
-        core = QColor(dot_color)
-        core.setAlpha(int(255 * blink))
-        painter.setBrush(core)
-        painter.drawRect(QRectF(text_x + 1.5, dot_cy - 1.6, 3.2, 3.2))
-
-        painter.setFont(label_font)
-        label_color = QColor(theme["accent"] if healthy else "#FF8A7A")
-        label_color.setAlpha(int(255 * blink))
-        painter.setPen(label_color)
-        painter.drawText(
-            QRectF(label_x, y, max(20, label_w), label_metrics.height()),
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            label,
+        painter.setBrush(QColor("#030100"))
+        painter.drawRoundedRect(cell, 3, 3)
+        painter.setPen(QPen(RED, 2.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(cell, 3, 3)
+        glow = QColor(RED)
+        glow.setAlpha(140)
+        painter.setPen(QPen(glow, 5))
+        painter.drawRoundedRect(cell, 3, 3)
+        inner = cell.adjusted(5, 5, -5, -4)
+        _spread_line(painter, QRectF(inner.x(), inner.y(), inner.width(), 20), "DANGER", make_en_font(15), RED)
+        _spread_line(
+            painter,
+            QRectF(inner.x(), inner.bottom() - 14, inner.width(), 14),
+            "EMERGENCY",
+            make_en_font(9),
+            RED,
         )
+        painter.restore()
 
-        y += label_metrics.height() + gap_after_label
-        painter.setFont(hero_font)
-        baseline = y + hero_metrics.ascent()
-        text_color = QColor(theme["text"])
-        text_color.setAlpha(int(255 * blink))
-        draw_time(painter, label_x, baseline, hero_text, text_color)
-        y += hero_metrics.height() + gap_after_hero
-
-        painter.setFont(sub_font)
-        muted = QColor(theme["muted"])
-        muted.setAlpha(int(255 * blink))
-        painter.setPen(muted)
-        shown = painter.fontMetrics().elidedText(subtitle, Qt.TextElideMode.ElideRight, int(text_w))
-        painter.drawText(
-            QRectF(label_x, y, text_w, sub_metrics.height()),
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            shown,
+    def _paint_subscribe(self, painter: QPainter) -> None:
+        cell = QRectF(1312, 428, 84, 48)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#030100"))
+        painter.drawRoundedRect(cell, 3, 3)
+        painter.setPen(QPen(RED, 2.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(cell, 3, 3)
+        inner = cell.adjusted(4, 3, -4, -2)
+        _spread_line(
+            painter,
+            QRectF(inner.x(), inner.y(), inner.width(), 16),
+            "登録する",
+            make_jp_font(13, QFont.Weight.Bold),
+            RED,
+        )
+        _glow_text(
+            painter,
+            QRectF(inner.x(), inner.y() + 16, inner.width(), 12),
+            "SUBSCRIBE",
+            _fitted_en("SUBSCRIBE", inner.width(), 9, 7),
+            RED,
+            int(Qt.AlignmentFlag.AlignCenter),
+        )
+        _glow_text(
+            painter,
+            QRectF(inner.x(), inner.bottom() - 10, inner.width(), 9),
+            "Code.Villkiss",
+            _fitted_en("Code.Villkiss", inner.width(), 6.5, 5),
+            RED,
+            int(Qt.AlignmentFlag.AlignCenter),
         )
 
     def enterEvent(self, event) -> None:  # noqa: N802

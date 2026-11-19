@@ -10,6 +10,7 @@ from engine import (  # noqa: E402
     REST_SECONDS,
     WORK_SECONDS,
     Engine,
+    format_countdown,
     format_duration,
     format_elapsed,
     split_interval,
@@ -25,6 +26,13 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(format_duration(300), "05:00")
         self.assertEqual(format_duration(3600), "1:00:00")
         self.assertEqual(format_duration(3661), "1:01:01")
+
+    def test_countdown_keeps_centiseconds(self) -> None:
+        self.assertEqual(format_countdown(0), "00:00:00")
+        self.assertEqual(format_countdown(0.006), "00:00:01")
+        self.assertEqual(format_countdown(1), "00:01:00")
+        self.assertEqual(format_countdown(12.34), "00:12:34")
+        self.assertEqual(format_countdown(765), "12:45:00")
 
     def test_elapsed_rounds_down(self) -> None:
         self.assertEqual(format_elapsed(0.9), "00:00")
